@@ -1,0 +1,584 @@
+---
+title: "meningitis"
+author: "DALISO NGULUBE"
+date: "2026-04-23"
+output: html_document
+---
+
+
+
+```{r}
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(janitor)
+library(zoo)
+library(flextable)
+library(officer)
+```
+
+
+### cleaning age disaggregation 
+```{r}
+clean_meningitis_data <- function(file_path, year_value) {
+  
+  # Read header rows
+  headers <- read_excel(file_path, n_max = 2, col_names = FALSE)
+  
+  h1 <- as.character(headers[1, ])
+  h2 <- as.character(headers[2, ])
+  
+  # Fill merged headers
+  h1 <- zoo::na.locf(h1, na.rm = FALSE)
+  
+  # Combine headers
+  new_names <- ifelse(
+    is.na(h2),
+    h1,
+    paste(h1, h2, sep = "_")
+  )
+  
+  new_names <- janitor::make_clean_names(new_names)
+  
+  # Load data
+  df <- read_excel(file_path, skip = 2, col_names = new_names)
+  
+  # Rename key columns
+  df <- df %>%
+    rename(
+      week_label = na_weeks,
+      district = na_districts
+    )
+  
+  # Fix structure
+  df <- df %>%
+    fill(week_label) %>%
+    filter(!is.na(district))
+  
+  # Create epidemiological week
+  df <- df %>%
+    mutate(
+      epi_week = match(week_label, unique(week_label)),
+      year = year_value
+    )
+  
+  # Clean variable names
+  df <- df %>%
+    rename_with(~ gsub("bacterial_meningitis_", "", .x)) %>%
+    rename_with(~ gsub("_years", "", .x)) %>%
+    rename_with(~ gsub("_year$", "", .x)) %>%
+    rename_with(~ gsub("death", "deaths", .x))
+  
+  return(df)
+}
+```
+
+#### load the data
+
+```{r}
+data1 <- clean_meningitis_data(
+  "C:/Users/USER1/OneDrive/Documents/Office Work_ ZNPHI/meningitis_daliso/data/data1.xlsx",
+  2026
+)
+
+data2 <- clean_meningitis_data(
+  "C:/Users/USER1/OneDrive/Documents/Office Work_ ZNPHI/meningitis_daliso/data/data2.xlsx",
+  2025
+)
+```
+
+### combine the data 
+
+```{r}
+data_all <- bind_rows(data1, data2)
+```
+
+### create total variables 
+```{r}
+data_all <- data_all %>%
+  mutate(
+    suspected_total = rowSums(select(., suspected_0_4, suspected_5_14, suspected_15), na.rm = TRUE),
+    confirmed_total = rowSums(select(., confirmed_0_4, confirmed_5_14, confirmed_15), na.rm = TRUE),
+    deaths_total = rowSums(select(., deaths_0_4, deaths_5_14, deaths_15), na.rm = TRUE)
+  )
+```
+
+### national summmary 
+```{r}
+national_summary <- data_all %>%
+  group_by(year) %>%
+  summarise(
+    suspected = sum(suspected_total, na.rm = TRUE),
+    confirmed = sum(confirmed_total, na.rm = TRUE),
+    deaths = sum(deaths_total, na.rm = TRUE)
+  ) %>%
+  mutate(
+    cfr_percent = round((deaths / suspected) * 100, 1)
+  )
+
+national_summary
+```
+```{r}
+library(writexl)
+
+write_xlsx(
+  national_summary,
+  "national_meningitis_summary_clean.xlsx"
+)
+```
+
+#### distributuon of cases 
+
+```{r}
+# =========================
+# LOAD LIBRARIES
+# =========================
+library(dplyr)
+library(gt)
+
+# =========================
+# STEP 1: CALCULATE NATIONAL TOTAL (2026)
+# =========================
+total_2026 <- data_all %>%
+  filter(year == 2026) %>%
+  summarise(total = sum(suspected_total, na.rm = TRUE)) %>%
+  pull(total)
+
+# =========================
+# STEP 2: BUILD DISTRICT TABLE
+# =========================
+district_2026_full <- data_all %>%
+  filter(year == 2026) %>%
+  group_by(district) %>%
+  summarise(
+    suspected = sum(suspected_total, na.rm = TRUE),
+    confirmed = sum(confirmed_total, na.rm = TRUE),
+    deaths = sum(deaths_total, na.rm = TRUE)
+  ) %>%
+  mutate(
+    proportion = round((suspected / total_2026) * 100, 1),
+    cfr = round((deaths / suspected) * 100, 1)
+  ) %>%
+  mutate(
+    cfr = ifelse(suspected == 0, NA, cfr)  # avoid NaN
+  ) %>%
+  arrange(desc(suspected))
+
+# =========================
+# STEP 3: CREATE GT TABLE
+# =========================
+gt_table <- district_2026_full %>%
+  gt() %>%
+  tab_header(
+    title = "Distribution of Meningitis Cases by District",
+    subtitle = paste0("Zambia, Weeks 1–16, 2026 (Total Cases: ", total_2026, ")")
+  ) %>%
+  cols_label(
+    district = "District",
+    suspected = "Suspected Cases",
+    proportion = "Contribution (%)",
+    confirmed = "Confirmed Cases",
+    deaths = "Deaths",
+    cfr = "CFR (%)"
+  ) %>%
+  fmt_number(
+    columns = c(suspected, confirmed, deaths),
+    decimals = 0
+  ) %>%
+  fmt_number(
+    columns = c(proportion, cfr),
+    decimals = 1
+  ) %>%
+  cols_align(
+    align = "center",
+    -district
+  ) %>%
+  grand_summary_rows(
+    columns = c(suspected, confirmed, deaths),
+    fns = list(Total = ~sum(., na.rm = TRUE))
+  )
+
+# =========================
+# STEP 4: SAVE AS WORD DOCUMENT
+# =========================
+gtsave(
+  gt_table,
+  "district_distribution_2026.docx"
+)
+```
+
+### top 10 districts 
+
+```{r}
+# =========================
+# LOAD LIBRARIES
+# =========================
+library(dplyr)
+library(ggplot2)
+
+# =========================
+# STEP 1: PREP DATA (TOP 10 + ORDERING)
+# =========================
+top10_plot <- district_2026_full %>%
+  arrange(desc(proportion)) %>%
+  slice_head(n = 10) %>%
+  mutate(
+    district = factor(district, levels = district)  # ensures descending order
+  )
+
+# =========================
+# STEP 2: BUILD COMPACT VERTICAL BAR CHART
+# =========================
+p <- ggplot(top10_plot, aes(x = district, y = proportion)) +
+  geom_col(
+    fill = "#6BAED6",
+    color = "black",
+    linewidth = 0.8,
+    width = 0.6   # slimmer bars
+  ) +
+  labs(
+    x = "District",
+    y = "Contribution (%)"
+  ) +
+  scale_y_continuous(
+    expand = expansion(mult = c(0, 0.05))  # reduce vertical padding
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black"),
+    axis.ticks = element_line(color = "black"),
+    
+    axis.text.x = element_text(
+      size = 10,
+      angle = 45,
+      hjust = 1,
+      face = "bold"
+    ),
+    
+    axis.text.y = element_text(size = 9),
+    axis.title = element_text(size = 10),
+    
+    plot.title = element_blank(),
+    plot.subtitle = element_blank()
+  )
+
+# =========================
+# STEP 3: VIEW
+# =========================
+p
+
+# =========================
+# STEP 4: EXPORT (SLIDE-READY)
+# =========================
+ggsave(
+  "top10_districts_compact.png",
+  plot = p,
+  width = 9,
+  height = 4,
+  dpi = 300
+)
+```
+
+### distribution by age
+
+```{r}
+# =========================
+# LOAD LIBRARIES
+# =========================
+library(dplyr)
+library(gt)
+
+# =========================
+# STEP 1: SUMMARISE DATA (2026)
+# =========================
+age_2026 <- data_all %>%
+  filter(year == 2026) %>%
+  summarise(
+    suspected_0_4 = sum(suspected_0_4, na.rm = TRUE),
+    suspected_5_14 = sum(suspected_5_14, na.rm = TRUE),
+    suspected_15 = sum(suspected_15, na.rm = TRUE),
+    
+    confirmed_0_4 = sum(confirmed_0_4, na.rm = TRUE),
+    confirmed_5_14 = sum(confirmed_5_14, na.rm = TRUE),
+    confirmed_15 = sum(confirmed_15, na.rm = TRUE),
+    
+    deaths_0_4 = sum(deaths_0_4, na.rm = TRUE),
+    deaths_5_14 = sum(deaths_5_14, na.rm = TRUE),
+    deaths_15 = sum(deaths_15, na.rm = TRUE)
+  )
+
+# =========================
+# STEP 2: BUILD BASE TABLE
+# =========================
+age_table <- data.frame(
+  age_group = c("0–4 years", "5–14 years", "15+ years"),
+  suspected = c(age_2026$suspected_0_4,
+                age_2026$suspected_5_14,
+                age_2026$suspected_15),
+  confirmed = c(age_2026$confirmed_0_4,
+                age_2026$confirmed_5_14,
+                age_2026$confirmed_15),
+  deaths = c(age_2026$deaths_0_4,
+             age_2026$deaths_5_14,
+             age_2026$deaths_15)
+)
+
+# =========================
+# STEP 3: CALCULATE TOTALS
+# =========================
+total_sus <- sum(age_table$suspected)
+total_conf <- sum(age_table$confirmed)
+total_deaths <- sum(age_table$deaths)
+
+# =========================
+# STEP 4: FORMAT n (%)
+# =========================
+age_table_final <- age_table %>%
+  mutate(
+    suspected = paste0(suspected, " (", round((suspected / total_sus) * 100, 1), "%)"),
+    confirmed = paste0(confirmed, " (", round((confirmed / total_conf) * 100, 1), "%)"),
+    deaths = paste0(deaths, " (", round((deaths / total_deaths) * 100, 1), "%)")
+  )
+
+# =========================
+# STEP 5: CREATE GT TABLE
+# =========================
+gt_age <- age_table_final %>%
+  gt() %>%
+  tab_header(
+    title = "Distribution of Meningitis Cases by Age Group",
+    subtitle = "Zambia, Weeks 1–16, 2026"
+  ) %>%
+  cols_label(
+    age_group = "Age Group",
+    suspected = "Suspected n (%)",
+    confirmed = "Confirmed n (%)",
+    deaths = "Deaths n (%)"
+  ) %>%
+  cols_align(
+    align = "center",
+    -age_group
+  )
+
+# =========================
+# STEP 6: SAVE AS WORD
+# =========================
+gtsave(
+  gt_age,
+  "age_distribution_2026.docx"
+)
+```
+
+
+
+### add populations 
+
+```{r}
+district_pop <- data.frame(
+  district = c(
+    "Chavuma","Kabompo","Kasama","Lufwanyama","Mongu","Pemba","Sinda",
+    "Chinsali","Kabwe","Katete","Lusaka","Mufulira","Petauke","Solwezi",
+    "Chipata","Kafue","Kitwe","Mambwe","Mwandi","Shibuyunji","Chongwe",
+    "Kapiri Mposhi","Livingstone","Mansa","Mwansabombwe","Siavonga",
+    "Itezhi-tezhi","Kaputa","Luanshya","Mbala","Ndola","Sikongo"
+  ),
+  population = c(
+    54959,65760,348552,133060,197816,101021,13762,
+    148997,299206,214072,2204059,200182,259385,332623,
+    327057,219574,661901,119313,40418,91616,313389,
+    371068,177393,166889,58919,66030,
+    130216,102854,211966,161595,624579,59670
+  )
+)
+```
+
+### confirm the districts are the same 
+```{r}
+setdiff(unique(data_all$district), district_pop$district)
+```
+
+### merge and calculate the rates
+```{r}
+district_rates_2026 <- data_all %>%
+  filter(year == 2026) %>%
+  left_join(district_pop, by = "district") %>%
+  group_by(district, population) %>%
+  summarise(
+    suspected = sum(suspected_total, na.rm = TRUE),
+    confirmed = sum(confirmed_total, na.rm = TRUE),
+    deaths = sum(deaths_total, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    confirmed_rate = round((confirmed / population) * 100000, 1),
+    suspected_rate = round((suspected / population) * 100000, 1),
+    death_rate = round((deaths / population) * 100000, 1)
+  ) %>%
+  arrange(desc(confirmed_rate))
+
+
+district_rates_2026
+```
+
+
+### attack rates for the reporting districts 
+
+```{r}
+# =========================
+# LOAD LIBRARIES
+# =========================
+library(dplyr)
+library(flextable)
+library(officer)
+
+# =========================
+# STEP 1: FILTER DISTRICTS WITH CONFIRMED CASES
+# =========================
+district_cases_only <- district_table_final %>%
+  filter(confirmed > 0) %>%
+  arrange(desc(attack_rate))
+
+# =========================
+# STEP 2: CLEAN COLUMN NAMES
+# =========================
+district_cases_only <- district_cases_only %>%
+  rename(
+    District = district,
+    Population = population,
+    `Confirmed Cases` = confirmed,
+    `Attack Rate (per 100,000)` = attack_rate
+  )
+
+# =========================
+# STEP 3: CREATE FORMATTED TABLE
+# =========================
+ft <- flextable(district_cases_only)
+
+ft <- ft %>%
+  colformat_num(j = "Population", big.mark = ",") %>%   # format population nicely
+  autofit() %>%
+  theme_booktabs() %>%
+  align(align = "center", part = "all") %>%
+  bold(i = 1:5, bold = TRUE)   # highlight top 5 districts
+
+# =========================
+# STEP 4: CREATE WORD DOCUMENT
+# =========================
+doc <- read_docx() %>%
+  body_add_par("Districts Reporting Confirmed Meningitis Cases", style = "heading 1") %>%
+  body_add_par("Zambia, Weeks 1–16, 2026", style = "Normal") %>%
+  body_add_par("Table shows districts with at least one confirmed case, ranked by attack rate.", style = "Normal") %>%
+  body_add_flextable(ft)
+
+# =========================
+# STEP 5: SAVE DOCUMENT
+# =========================
+print(doc, target = "district_attack_rate_cases_only_2026.docx")
+```
+
+### case fatality rates by age group 
+
+
+```{r}
+# =========================
+# LOAD LIBRARIES
+# =========================
+library(dplyr)
+library(ggplot2)
+
+# =========================
+# STEP 1: SUMMARISE DATA (2026)
+# =========================
+cfr_age_2026 <- data_all %>%
+  filter(year == 2026) %>%
+  summarise(
+    confirmed_0_4 = sum(confirmed_0_4, na.rm = TRUE),
+    confirmed_5_14 = sum(confirmed_5_14, na.rm = TRUE),
+    confirmed_15 = sum(confirmed_15, na.rm = TRUE),
+    
+    deaths_0_4 = sum(deaths_0_4, na.rm = TRUE),
+    deaths_5_14 = sum(deaths_5_14, na.rm = TRUE),
+    deaths_15 = sum(deaths_15, na.rm = TRUE)
+  )
+
+# =========================
+# STEP 2: BUILD CFR TABLE
+# =========================
+cfr_table <- data.frame(
+  Age_Group = c("0–4 years", "5–14 years", "15+ years"),
+  Confirmed = c(cfr_age_2026$confirmed_0_4,
+                cfr_age_2026$confirmed_5_14,
+                cfr_age_2026$confirmed_15),
+  Deaths = c(cfr_age_2026$deaths_0_4,
+             cfr_age_2026$deaths_5_14,
+             cfr_age_2026$deaths_15)
+)
+
+# =========================
+# STEP 3: CALCULATE CFR SAFELY
+# =========================
+cfr_table <- cfr_table %>%
+  mutate(
+    CFR = ifelse(
+      Confirmed == 0,
+      NA,
+      round((Deaths / Confirmed) * 100, 1)
+    )
+  )
+
+# =========================
+# STEP 4: SORT HIGH → LOW
+# =========================
+cfr_table <- cfr_table %>%
+  arrange(desc(CFR))
+
+# =========================
+# STEP 5: FIX ORDER FOR PLOTTING
+# =========================
+cfr_table$Age_Group <- factor(
+  cfr_table$Age_Group,
+  levels = cfr_table$Age_Group
+)
+
+# =========================
+# STEP 6: CREATE CHART (NO LABELS)
+# =========================
+p_cfr <- ggplot(cfr_table, aes(x = Age_Group, y = CFR)) +
+  geom_col(
+    fill = "#6BAED6",
+    color = "black",
+    width = 0.6
+  ) +
+  labs(
+    x = "Age Group",
+    y = "Case Fatality Rate (%)"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black"),
+    axis.ticks = element_line(color = "black"),
+    
+    axis.text = element_text(size = 11),
+    axis.title = element_text(size = 12)
+  )
+
+# =========================
+# STEP 7: VIEW PLOT
+# =========================
+p_cfr
+
+# =========================
+# STEP 8: EXPORT IMAGE
+# =========================
+ggsave(
+  "cfr_by_age_2026_clean.png",
+  plot = p_cfr,
+  width = 7,
+  height = 4,
+  dpi = 300
+)
+```
+
+
